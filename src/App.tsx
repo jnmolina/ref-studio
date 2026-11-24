@@ -37,6 +37,11 @@ import {
   ScreenRecorderHandle,
   startScreenCapture,
 } from './utils/videoExtractor';
+import {
+  clientFetchPinterest,
+  clientSearchImages,
+  isStaticHost,
+} from './utils/clientSearch';
 
 const DEFAULT_TRANSFORM: TransformSettings = {
   zoom: 1,
@@ -215,33 +220,57 @@ export function App() {
           headers['x-google-cx'] = googleCx;
         }
         const isPinterest = /^https?:\/\/(www\.)?(pinterest\.[a-z.]+|pin\.it)\//i.test(searchTerm);
-
-        let res: Response;
-        if (isPinterest) {
-          res = await fetch(`/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60`);
-        } else {
-          let scopedSites: string[] = [];
-          if (searchScope === 'golden-all') {
-            scopedSites = goldenSites.map((s) => s.domain);
-          } else if (searchScope.startsWith('group:')) {
-            const grp = searchScope.slice(6);
-            scopedSites = goldenSites
-              .filter((s) => (s.group || 'General') === grp)
-              .map((s) => s.domain);
-          } else if (searchScope.startsWith('site:')) {
-            scopedSites = [searchScope.slice(5)];
-          }
-          const sitesParam = scopedSites.length > 0 ? `&sites=${encodeURIComponent(scopedSites.join(','))}` : '';
-
-          res = await fetch(
-            `/api/search?q=${encodeURIComponent(searchTerm)}&count=40&safe=${safeSearch}&gifs=${gifMode}${sitesParam}`,
-            { headers }
-          );
+        let scopedSites: string[] = [];
+        if (searchScope === 'golden-all') {
+          scopedSites = goldenSites.map((s) => s.domain);
+        } else if (searchScope.startsWith('group:')) {
+          const grp = searchScope.slice(6);
+          scopedSites = goldenSites
+            .filter((s) => (s.group || 'General') === grp)
+            .map((s) => s.domain);
+        } else if (searchScope.startsWith('site:')) {
+          scopedSites = [searchScope.slice(5)];
         }
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Search failed');
 
-        if (!data.images || data.images.length === 0) {
+        let fetchedImages: RefImage[] = [];
+        let activeProvider = 'web';
+
+        if (isStaticHost()) {
+          if (isPinterest) {
+            fetchedImages = await clientFetchPinterest(searchTerm, 60);
+            activeProvider = 'pinterest';
+          } else {
+            const res = await clientSearchImages({
+              query: searchTerm,
+              count: 40,
+              safeSearch,
+              gifMode,
+              sites: scopedSites,
+              googleApiKey,
+              googleCx,
+            });
+            fetchedImages = res.images;
+            activeProvider = res.provider;
+          }
+        } else {
+          let res: Response;
+          if (isPinterest) {
+            res = await fetch(`/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60`);
+          } else {
+            const sitesParam =
+              scopedSites.length > 0 ? `&sites=${encodeURIComponent(scopedSites.join(','))}` : '';
+            res = await fetch(
+              `/api/search?q=${encodeURIComponent(searchTerm)}&count=40&safe=${safeSearch}&gifs=${gifMode}${sitesParam}`,
+              { headers }
+            );
+          }
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Search failed');
+          fetchedImages = data.images || [];
+          activeProvider = data.provider || 'google';
+        }
+
+        if (fetchedImages.length === 0) {
           setSearchError(`No images found for "${searchTerm}". Try a different theme.`);
           return;
         }
@@ -250,7 +279,7 @@ export function App() {
         const seenBatch = new Set<string>();
         const stamped: RefImage[] = [];
 
-        for (const img of data.images as RefImage[]) {
+        for (const img of fetchedImages) {
           if (dislikedUrls[img.url]) continue;
           if (existingUrls.has(img.url) || seenBatch.has(img.url)) continue;
           seenBatch.add(img.url);
@@ -277,7 +306,7 @@ export function App() {
           });
         }
 
-        setProvider(data.provider || 'google');
+        setProvider(activeProvider);
         setTimeRemainingSec(intervalSec);
         setIsPlaying(true);
       } catch (err: any) {

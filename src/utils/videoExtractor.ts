@@ -1,4 +1,5 @@
 import { RefImage } from '../types';
+import { isStaticHost } from './clientSearch';
 
 export interface VideoExtractOptions {
   fps?: number;
@@ -11,6 +12,13 @@ export async function resolveVideoSource(rawUrl: string): Promise<{
   pageUrl: string;
   title: string;
 }> {
+  if (isStaticHost()) {
+    return {
+      proxiedUrl: rawUrl,
+      pageUrl: rawUrl,
+      title: rawUrl.split('/').filter(Boolean).pop() || 'Video Study',
+    };
+  }
   const res = await fetch(`/api/video-resolve?url=${encodeURIComponent(rawUrl)}`);
   const data = await res.json();
   if (!res.ok) {

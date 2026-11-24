@@ -1,9 +1,13 @@
 import JSZip from 'jszip';
 import { RefImage } from '../types';
+import { isStaticHost } from './clientSearch';
 
 export function getProxiedUrl(url: string, pageUrl?: string): string {
   if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('/api/')) {
     return url;
+  }
+  if (isStaticHost()) {
+    return `https://wsrv.nl/?url=${encodeURIComponent(url)}&n=-1`;
   }
   const refPart = pageUrl && /^https?:\/\//i.test(pageUrl) ? `&ref=${encodeURIComponent(pageUrl)}` : '';
   return `/api/proxy?url=${encodeURIComponent(url)}${refPart}`;
