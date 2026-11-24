@@ -24,8 +24,10 @@ import {
   SlidersHorizontal,
   Clock,
   PanelRight,
+  Link2,
 } from 'lucide-react';
 import { GifMode, GoldenSite } from '../types';
+import { detectInputKind } from '../utils/clientSearch';
 
 interface TopBarProps {
   query: string;
@@ -60,6 +62,7 @@ interface TopBarProps {
   gifMode: GifMode;
   onGifModeChange: (m: GifMode) => void;
   onOpenVideoModal: () => void;
+  onOpenLinkModal: () => void;
   goldenSites: GoldenSite[];
   searchScope: string;
   onSearchScopeChange: (scope: string) => void;
@@ -114,6 +117,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   gifMode,
   onGifModeChange,
   onOpenVideoModal,
+  onOpenLinkModal,
   goldenSites,
   searchScope,
   onSearchScopeChange,
@@ -136,6 +140,15 @@ export const TopBar: React.FC<TopBarProps> = ({
   const progressPct = intervalSec > 0 ? ((intervalSec - timeRemainingSec) / intervalSec) * 100 : 0;
   const activeFilterCount =
     (searchScope !== 'all' ? 1 : 0) + (gifMode !== 'exclude' ? 1 : 0) + (!safeSearch ? 1 : 0);
+  const inputKind = detectInputKind(query);
+  const submitLabel =
+    inputKind === 'pinterest'
+      ? 'Load Board'
+      : inputKind === 'image-url' || inputKind === 'web-url'
+      ? 'Load Link'
+      : inputKind === 'video'
+      ? 'Load Video'
+      : 'Search';
 
   return (
     <header className="topbar">
@@ -151,9 +164,20 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="text"
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
-            placeholder="Search theme or paste Pinterest board / video URL..."
+            placeholder="Search theme, or paste Pinterest board / image / webpage URL..."
             className="search-input"
           />
+          {inputKind !== 'search' && (
+            <span className="detected-kind-badge">
+              {inputKind === 'pinterest'
+                ? 'Pinterest'
+                : inputKind === 'image-url'
+                ? 'Image URL'
+                : inputKind === 'video'
+                ? 'Video'
+                : 'Web Link'}
+            </span>
+          )}
           {query && (
             <button
               type="button"
@@ -165,9 +189,19 @@ export const TopBar: React.FC<TopBarProps> = ({
             </button>
           )}
           <button type="submit" className="btn btn-primary btn-sm" disabled={isSearching || !query.trim()}>
-            {isSearching ? <Loader2 size={14} className="spin" /> : 'Go'}
+            {isSearching ? <Loader2 size={14} className="spin" /> : submitLabel}
           </button>
         </form>
+
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={onOpenLinkModal}
+          title="Load a Pinterest board, webpage URL, or list of direct image/GIF links"
+        >
+          <Link2 size={13} />
+          <span>Board / Links</span>
+        </button>
 
         <div className="dropdown-wrap">
           <button

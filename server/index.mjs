@@ -370,45 +370,35 @@ app.get('/api/proxy', async (req, res) => {
 });
 
 /**
- * Extract public pins from a Pinterest board or pin URL (in-memory only, zero storage).
+ * Extract public pins from a Pinterest board, user/board shorthand, or pin URL (in-memory only, zero storage).
  */
 app.get('/api/pinterest', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  const boardUrl = String(req.query.url || '').trim();
-  const count = Math.min(parseInt(String(req.query.count || '40'), 10) || 40, 80);
+  let boardUrl = String(req.query.url || '').trim();
+  const count = Math.min(parseInt(String(req.query.count || '50'), 10) || 50, 80);
 
-  if (!boardUrl || !/^https?:\/\/(www\.)?(pinterest\.[a-z.]+|pin\.it)\//i.test(boardUrl)) {
-    return res.status(400).json({ error: 'Please enter a valid Pinterest board or pin URL.' });
+  if (!boardUrl) {
+    return res.status(400).json({ error: 'Please enter a Pinterest board URL or username/board.' });
+  }
+
+  // Allow shorthand like "username/board-name"
+  if (!/^https?:\/\//i.test(boardUrl)) {
+    const cleanPath = boardUrl.replace(/^^(www\.)?pinterest\.[a-z.]+\//i, '').replace(/^\/+|\/+$/g, '');
+    boardUrl = `https://www.pinterest.com/${cleanPath}/`;
   }
 
   try {
-    const pageRes = await fetch(boardUrl, {
-      redirect: 'follow',
-      headers: {
-        'User-Agent': BROWSER_UA,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    });
-
-    if (!pageRes.ok) {
-      return res.status(pageRes.status).json({ error: `Pinterest returned HTTP ${pageRes.status}` });
-    }
-
-    const html = await pageRes.text();
     const seenKeys = new Set();
     const images = [];
 
     const addPin = (imgUrl, title = '', pinId = '') => {
       if (!imgUrl || !/^https?:\/\//i.test(imgUrl)) return;
-      // Deduplicate by pinimg hash path
       const keyMatch = imgUrl.match(/\/([a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]+\.[a-z]+)/i);
       const key = keyMatch ? keyMatch[1] : imgUrl;
       if (seenKeys.has(key)) return;
       seenKeys.add(key);
 
-      // Prefer 736x or originals over tiny 236x thumbnails
-      const hiResUrl = imgUrl.replace(/\/(75x75_RS|136x136|170x|236x|474x)\//i, '/736x/');
+      const hiResUrl = imgUrl.replace(/\/(75x75_RS|136x136|170x|236x|474x|564x)\//i, '/736x/');
       const thumbUrl = imgUrl.replace(/\/(originals|736x)\//i, '/474x/');
 
       images.push({
@@ -423,41 +413,101 @@ app.get('/api/pinterest', async (req, res) => {
       });
     };
 
-    // 1. Try parsing __PWS_DATA__ JSON embedded in the page
-    const pwsMatch = html.match(/<script[^>]+id=["']__PWS_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
-    if (pwsMatch) {
+    // Resolve pin.it shortlinks first so we get the real board/pin URL
+    if (/^https?:\/\/(www\.)?pin\.it\//i.test(boardUrl)) {
       try {
-        const pws = JSON.parse(pwsMatch[1]);
-        const walk = (node) => {
-          if (!node || typeof node !== 'object' || images.length >= count) return;
-          if (node.images && typeof node.images === 'object') {
-            const best =
-              node.images.orig?.url ||
-              node.images['736x']?.url ||
-              node.images['564x']?.url ||
-              node.images['474x']?.url;
-            if (best) {
-              addPin(best, node.grid_title || node.title || node.description || '', node.id || '');
-            }
-          }
-          if (Array.isArray(node)) {
-            for (const item of node) walk(item);
-          } else {
-            for (const val of Object.values(node)) walk(val);
-          }
-        };
-        walk(pws);
+        const redir = await fetch(boardUrl, {
+          redirect: 'follow',
+          headers: { 'User-Agent': BROWSER_UA },
+        });
+        if (redir.url) boardUrl = redir.url;
       } catch {
-        // Fallback to regex extraction below
+        // continue with original URL
       }
     }
 
-    // 2. Regex fallback for pinimg URLs in HTML/JSON scripts
-    if (images.length < count) {
-      const pinRegex = /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x|236x)\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]+\.(?:jpg|jpeg|png|webp)/gi;
-      let m;
-      while ((m = pinRegex.exec(html)) !== null && images.length < count) {
-        addPin(m[0]);
+    // 1. Try Pinterest's fast JSON Pidgets Board API first
+    try {
+      const parsedUrl = new URL(boardUrl);
+      const segs = parsedUrl.pathname.split('/').filter(Boolean);
+      if (segs.length >= 2 && segs[0].toLowerCase() !== 'pin' && segs[0].toLowerCase() !== 'search') {
+        const user = encodeURIComponent(segs[0]);
+        const board = encodeURIComponent(segs[1]);
+        const pidgetRes = await fetch(
+          `https://api.pinterest.com/v3/pidgets/boards/${user}/${board}/pins/?page_size=50`,
+          { headers: { 'User-Agent': BROWSER_UA } }
+        );
+        if (pidgetRes.ok) {
+          const pidgetData = await pidgetRes.json();
+          const pins = pidgetData?.data?.pins || [];
+          for (const pin of pins) {
+            if (images.length >= count) break;
+            const imgObj = pin?.images || {};
+            const best =
+              imgObj['736x']?.url ||
+              imgObj['564x']?.url ||
+              imgObj['474x']?.url ||
+              imgObj['236x']?.url;
+            if (best) {
+              const title = (pin.description || pin.rich_summary?.display_name || '').trim();
+              addPin(best, title, pin.id || '');
+            }
+          }
+        }
+      }
+    } catch {
+      // Fall through to HTML parsing
+    }
+
+    // 2. If pidgets didn't return pins (e.g., single pin URL or board section), inspect HTML
+    if (images.length === 0) {
+      const pageRes = await fetch(boardUrl, {
+        redirect: 'follow',
+        headers: {
+          'User-Agent': BROWSER_UA,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      });
+
+      if (pageRes.ok) {
+        const html = await pageRes.text();
+        const pwsMatch = html.match(/<script[^>]+id=["']__PWS_DATA__["'][^>]*>([\s\S]*?)<\/script>/i);
+        if (pwsMatch) {
+          try {
+            const pws = JSON.parse(pwsMatch[1]);
+            const walk = (node) => {
+              if (!node || typeof node !== 'object' || images.length >= count) return;
+              if (node.images && typeof node.images === 'object') {
+                const best =
+                  node.images.orig?.url ||
+                  node.images['736x']?.url ||
+                  node.images['564x']?.url ||
+                  node.images['474x']?.url;
+                if (best) {
+                  addPin(best, node.grid_title || node.title || node.description || '', node.id || '');
+                }
+              }
+              if (Array.isArray(node)) {
+                for (const item of node) walk(item);
+              } else {
+                for (const val of Object.values(node)) walk(val);
+              }
+            };
+            walk(pws);
+          } catch {
+            // Fallback to regex below
+          }
+        }
+
+        if (images.length < count) {
+          const pinRegex =
+            /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x|236x)\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]+\.(?:jpg|jpeg|png|webp|gif)/gi;
+          let m;
+          while ((m = pinRegex.exec(html)) !== null && images.length < count) {
+            addPin(m[0]);
+          }
+        }
       }
     }
 
@@ -469,6 +519,136 @@ app.get('/api/pinterest', async (req, res) => {
     });
   } catch (err) {
     return res.status(502).json({ error: err.message || 'Failed to load Pinterest board' });
+  }
+});
+
+/**
+ * Extract reference images from any webpage link or direct image URL (in-memory only, zero storage).
+ */
+app.get('/api/extract-url', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const targetUrl = String(req.query.url || '').trim();
+  const count = Math.min(parseInt(String(req.query.count || '40'), 10) || 40, 80);
+
+  if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
+    return res.status(400).json({ error: 'Please enter a valid http(s) URL.' });
+  }
+
+  // If it's a direct image URL, return it immediately
+  if (/\.(jpg|jpeg|png|webp|gif|avif)(\?|#|$)/i.test(targetUrl)) {
+    const filename = targetUrl.split('/').pop()?.split('?')[0] || 'Reference Image';
+    return res.json({
+      url: targetUrl,
+      provider: 'direct-link',
+      count: 1,
+      images: [
+        {
+          id: `link-${Date.now()}-0`,
+          url: targetUrl,
+          pageUrl: targetUrl,
+          thumbnail: targetUrl,
+          title: filename,
+          width: 1000,
+          height: 1000,
+          source: 'direct-link',
+        },
+      ],
+    });
+  }
+
+  try {
+    const pageRes = await fetch(targetUrl, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent': BROWSER_UA,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    if (!pageRes.ok) {
+      return res.status(pageRes.status).json({ error: `Link returned HTTP ${pageRes.status}` });
+    }
+
+    const ct = pageRes.headers.get('content-type') || '';
+    if (ct.startsWith('image/')) {
+      return res.json({
+        url: targetUrl,
+        provider: 'direct-link',
+        count: 1,
+        images: [
+          {
+            id: `link-${Date.now()}-0`,
+            url: targetUrl,
+            pageUrl: targetUrl,
+            thumbnail: targetUrl,
+            title: targetUrl.split('/').pop() || 'Direct Image',
+            width: 1000,
+            height: 1000,
+            source: 'direct-link',
+          },
+        ],
+      });
+    }
+
+    const html = await pageRes.text();
+    const seen = new Set();
+    const images = [];
+
+    const addImage = (rawSrc, label = '') => {
+      if (!rawSrc || images.length >= count) return;
+      const cleaned = rawSrc.replace(/&amp;/g, '&').trim();
+      if (cleaned.startsWith('data:') || cleaned.endsWith('.svg')) return;
+      try {
+        const abs = new URL(cleaned, pageRes.url || targetUrl).toString();
+        if (!/^https?:\/\//i.test(abs) || seen.has(abs)) return;
+        if (/(favicon|logo|icon|avatar|badge|pixel|tracker|spinner|1x1|sprite|emoji)/i.test(abs)) {
+          return;
+        }
+        seen.add(abs);
+        images.push({
+          id: `page-${Date.now()}-${images.length}-${Math.random().toString(36).slice(2, 6)}`,
+          url: abs,
+          pageUrl: pageRes.url || targetUrl,
+          thumbnail: abs,
+          title: label || `Reference ${images.length + 1}`,
+          width: 900,
+          height: 900,
+          source: 'web-link',
+        });
+      } catch {
+        // ignore invalid URLs
+      }
+    };
+
+    // 1. OpenGraph / Twitter card hero images
+    const metaRegex =
+      /<meta[^>]+(?:property|name)=["'](?:og:image|og:image:secure_url|twitter:image)["'][^>]+content=["']([^"']+)["']/gi;
+    let m;
+    while ((m = metaRegex.exec(html)) !== null) {
+      addImage(m[1], 'Featured Image');
+    }
+
+    // 2. <img src / data-src / data-lazy-src> tags
+    const imgTagRegex = /<img[^>]+(?:data-src|data-lazy-src|data-original|src)=["']([^"']+)["'][^>]*>/gi;
+    while ((m = imgTagRegex.exec(html)) !== null && images.length < count) {
+      addImage(m[1]);
+    }
+
+    // 3. Direct high-res image URLs embedded in page scripts/JSON
+    const rawImgRegex = /https?:\/\/[^"'\s<>\\]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"'\s<>\\]*)?/gi;
+    while ((m = rawImgRegex.exec(html)) !== null && images.length < count) {
+      addImage(m[0]);
+    }
+
+    return res.json({
+      url: targetUrl,
+      provider: 'web-link',
+      count: images.length,
+      images,
+    });
+  } catch (err) {
+    return res.status(502).json({ error: err.message || 'Failed to extract images from link' });
   }
 });
 

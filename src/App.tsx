@@ -38,8 +38,10 @@ import {
   startScreenCapture,
 } from './utils/videoExtractor';
 import {
+  clientExtractUrlImages,
   clientFetchPinterest,
   clientSearchImages,
+  detectInputKind,
   isStaticHost,
 } from './utils/clientSearch';
 
@@ -177,6 +179,8 @@ export function App() {
   const [searchScope, setSearchScope] = useState<string>('all');
   const [showGoldenModal, setShowGoldenModal] = useState(false);
   const [showInspector, setShowInspector] = useState(true);
+  const [showLinkModal, setShowLinkModal] = useState(false);
+  const [linkInputText, setLinkInputText] = useState('');
 
   useEffect(() => {
     try {
@@ -219,7 +223,7 @@ export function App() {
           headers['x-google-api-key'] = googleApiKey;
           headers['x-google-cx'] = googleCx;
         }
-        const isPinterest = /^https?:\/\/(www\.)?(pinterest\.[a-z.]+|pin\.it)\//i.test(searchTerm);
+        const kind = detectInputKind(searchTerm);
         let scopedSites: string[] = [];
         if (searchScope === 'golden-all') {
           scopedSites = goldenSites.map((s) => s.domain);
@@ -235,35 +239,54 @@ export function App() {
         let fetchedImages: RefImage[] = [];
         let activeProvider = 'web';
 
-        if (isStaticHost()) {
-          if (isPinterest) {
+        if (kind === 'pinterest') {
+          activeProvider = 'pinterest';
+          if (isStaticHost()) {
             fetchedImages = await clientFetchPinterest(searchTerm, 60);
-            activeProvider = 'pinterest';
           } else {
-            const res = await clientSearchImages({
-              query: searchTerm,
-              count: 40,
-              safeSearch,
-              gifMode,
-              sites: scopedSites,
-              googleApiKey,
-              googleCx,
-            });
-            fetchedImages = res.images;
-            activeProvider = res.provider;
+            try {
+              const res = await fetch(`/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60`);
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Pinterest fetch failed');
+              fetchedImages = data.images || [];
+            } catch {
+              fetchedImages = await clientFetchPinterest(searchTerm, 60);
+            }
           }
+        } else if (kind === 'image-url' || kind === 'web-url') {
+          activeProvider = kind === 'image-url' ? 'direct-link' : 'web-link';
+          if (isStaticHost()) {
+            fetchedImages = await clientExtractUrlImages(searchTerm, 50);
+          } else {
+            try {
+              const res = await fetch(`/api/extract-url?url=${encodeURIComponent(searchTerm)}&count=50`);
+              const data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'Link extraction failed');
+              fetchedImages = data.images || [];
+              activeProvider = data.provider || activeProvider;
+            } catch {
+              fetchedImages = await clientExtractUrlImages(searchTerm, 50);
+            }
+          }
+        } else if (isStaticHost()) {
+          const res = await clientSearchImages({
+            query: searchTerm,
+            count: 40,
+            safeSearch,
+            gifMode,
+            sites: scopedSites,
+            googleApiKey,
+            googleCx,
+          });
+          fetchedImages = res.images;
+          activeProvider = res.provider;
         } else {
-          let res: Response;
-          if (isPinterest) {
-            res = await fetch(`/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60`);
-          } else {
-            const sitesParam =
-              scopedSites.length > 0 ? `&sites=${encodeURIComponent(scopedSites.join(','))}` : '';
-            res = await fetch(
-              `/api/search?q=${encodeURIComponent(searchTerm)}&count=40&safe=${safeSearch}&gifs=${gifMode}${sitesParam}`,
-              { headers }
-            );
-          }
+          const sitesParam =
+            scopedSites.length > 0 ? `&sites=${encodeURIComponent(scopedSites.join(','))}` : '';
+          const res = await fetch(
+            `/api/search?q=${encodeURIComponent(searchTerm)}&count=40&safe=${safeSearch}&gifs=${gifMode}${sitesParam}`,
+            { headers }
+          );
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Search failed');
           fetchedImages = data.images || [];
@@ -320,7 +343,7 @@ export function App() {
 
   const handleSearch = useCallback(
     (searchTerm: string) => {
-      if (/^https?:\/\/.+\.(mp4|webm|mov|m4v|ogv)(\?|#|$)/i.test(searchTerm)) {
+      if (detectInputKind(searchTerm) === 'video') {
         setVideoUrlInput(searchTerm);
         setVideoError(null);
         setShowVideoModal(true);
@@ -334,6 +357,26 @@ export function App() {
     },
     [images.length, executeSearch]
   );
+
+  const handleLoadLinksModal = async (mode: 'replace' | 'append') => {
+    const lines = linkInputText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (lines.length === 0) return;
+
+    setShowLinkModal(false);
+    if (lines.length === 1) {
+      setQuery(lines[0]);
+      await executeSearch(lines[0], mode);
+      return;
+    }
+
+    // Multiple lines: load each image/link or board in order
+    for (let i = 0; i < lines.length; i++) {
+      await executeSearch(lines[i], i === 0 ? mode : 'append');
+    }
+  };
 
   const goToIndex = useCallback(
     (idx: number) => {
@@ -813,6 +856,7 @@ export function App() {
           setVideoError(null);
           setShowVideoModal(true);
         }}
+        onOpenLinkModal={() => setShowLinkModal(true)}
         goldenSites={goldenSites}
         searchScope={searchScope}
         onSearchScopeChange={setSearchScope}
@@ -949,6 +993,77 @@ export function App() {
         onFlipExtreme={flipExtreme}
         onStepFrame={stepFrame}
       />
+
+      {showLinkModal && (
+        <div className="modal-backdrop" onClick={() => setShowLinkModal(false)}>
+          <div className="modal-card" style={{ width: 520 }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Load Pinterest Board or Web Links</h3>
+            </div>
+            <p className="modal-desc">
+              Paste a <strong>public Pinterest board URL</strong> (or{' '}
+              <code>username/board-name</code>), any <strong>webpage link</strong> to pull its
+              images, or <strong>one or more direct image/GIF URLs</strong> (one per line).
+            </p>
+
+            <label className="field-label">
+              Board URL, Webpage Link, or Image/GIF URLs (one per line)
+              <textarea
+                rows={4}
+                value={linkInputText}
+                onChange={(e) => setLinkInputText(e.target.value)}
+                placeholder={
+                  'https://www.pinterest.com/username/board-name/\nor: username/board-name\nor: https://example.com/pose-1.jpg'
+                }
+                className="modal-input"
+                style={{ resize: 'vertical', fontFamily: 'inherit' }}
+              />
+            </label>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+              <span className="mini-label">Quick examples:</span>
+              <button
+                type="button"
+                className="pill"
+                onClick={() => setLinkInputText('https://www.pinterest.com/pinterest/official-news/')}
+              >
+                Sample Pinterest Board
+              </button>
+              <button
+                type="button"
+                className="pill"
+                onClick={() =>
+                  setLinkInputText('https://en.wikipedia.org/wiki/Eadweard_Muybridge')
+                }
+              >
+                Muybridge Motion Page
+              </button>
+            </div>
+
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setShowLinkModal(false)}>
+                Cancel
+              </button>
+              {images.length > 0 && (
+                <button
+                  className="btn btn-ghost"
+                  disabled={!linkInputText.trim() || isSearching}
+                  onClick={() => handleLoadLinksModal('append')}
+                >
+                  Append to Session
+                </button>
+              )}
+              <button
+                className="btn btn-primary"
+                disabled={!linkInputText.trim() || isSearching}
+                onClick={() => handleLoadLinksModal('replace')}
+              >
+                {images.length > 0 ? 'Replace Session' : 'Load into Session'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showVideoModal && (
         <div className="modal-backdrop" onClick={() => !videoProgress && setShowVideoModal(false)}>
