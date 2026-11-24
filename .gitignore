@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-exe/
+dist-desktop/win-unpacked/
+dist-desktop/*.yaml
+dist-desktop/*.yml
+dist-desktop/*.blockmap
+server/bundle.cjs
+.DS_Store
