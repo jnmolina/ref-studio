@@ -50,7 +50,7 @@ export const TimelineBar: React.FC<TimelineBarProps> = ({
   const currentImage = images[currentIndex];
   const isAnimatedGif =
     currentImage &&
-    /\.gif(\?|#|$)/i.test(currentImage.url) &&
+    (/\.gif(\?|#|$)/i.test(currentImage.url) || currentImage.source === 'bing-gif') &&
     currentImage.source !== 'gif-frame';
 
   const extremeCount = images.filter((img) => extremeIds[img.id]).length;

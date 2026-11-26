@@ -196,6 +196,27 @@ export const TopBar: React.FC<TopBarProps> = ({
           </button>
         </form>
 
+        <select
+          className="search-filter-select"
+          value={gifMode}
+          onChange={(e) => onGifModeChange(e.target.value as GifMode)}
+          title="GIF search filter"
+        >
+          <option value="exclude">No GIFs</option>
+          <option value="include">+ GIFs</option>
+          <option value="only">GIFs Only</option>
+        </select>
+
+        <button
+          type="button"
+          className={`btn btn-sm ${safeSearch ? 'btn-ghost' : 'btn-nsfw'}`}
+          onClick={onToggleSafeSearch}
+          title={safeSearch ? 'SafeSearch ON (click to allow NSFW)' : 'SafeSearch OFF / NSFW allowed'}
+        >
+          {safeSearch ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+          <span>{safeSearch ? 'Safe' : 'NSFW'}</span>
+        </button>
+
         <button
           type="button"
           className="btn btn-sm btn-ghost"

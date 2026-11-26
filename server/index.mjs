@@ -48,7 +48,7 @@ function filterAndRankImages(items, { gifMode = 'exclude', minDim = 480 } = {}) 
     }
 
     // GIF filtering
-    const isGif = GIF_URL_RE.test(u);
+    const isGif = GIF_URL_RE.test(u) || item.isGif === true;
     if (gifMode === 'exclude' && isGif) return false;
     if (gifMode === 'only' && !isGif) return false;
 
@@ -162,21 +162,75 @@ async function searchGoogleImagesHTML(query, count = 45, safeSearch = true) {
 }
 
 /**
+ * Bing Images async search (supports SafeSearch off via adlt=off and animated GIF filter via qft=+filterui:photo-animatedgif).
+ */
+async function searchBingImages(query, count = 45, safeSearch = true, gifMode = 'exclude') {
+  const adlt = safeSearch ? 'strict' : 'off';
+  const qft = gifMode === 'only' ? '&qft=+filterui:photo-animatedgif' : '';
+  const url = `https://www.bing.com/images/async?q=${encodeURIComponent(query)}&first=0&count=${count}&adlt=${adlt}${qft}`;
+
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': BROWSER_UA,
+      Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+  });
+  if (!res.ok) return [];
+
+  const html = await res.text();
+  const results = [];
+  const seen = new Set();
+
+  // Extract m="{&quot;murl&quot;:...}" JSON blocks from Bing image cards
+  const cardRegex = /\bm="(\{&quot;[^"]+\})"/g;
+  let m;
+  while ((m = cardRegex.exec(html)) !== null && results.length < count) {
+    try {
+      const decoded = m[1]
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&#39;/g, "'");
+      const meta = JSON.parse(decoded);
+      const imgUrl = meta.murl;
+      if (!imgUrl || !/^https?:\/\//i.test(imgUrl) || seen.has(imgUrl)) continue;
+      seen.add(imgUrl);
+
+      const isGif = GIF_URL_RE.test(imgUrl) || gifMode === 'only';
+      results.push({
+        id: `bing-${Date.now()}-${results.length}-${Math.random().toString(36).slice(2, 7)}`,
+        url: imgUrl,
+        pageUrl: meta.purl || imgUrl,
+        thumbnail: meta.turl || imgUrl,
+        title: (meta.t || query).replace(/[\uE000-\uF8FF]/g, '').trim() || query,
+        width: 900,
+        height: 900,
+        isGif,
+        source: isGif ? 'bing-gif' : 'bing',
+      });
+    } catch {
+      // ignore malformed card
+    }
+  }
+  return results;
+}
+
+/**
  * DuckDuckGo Images fallback (in-memory only, no storage).
  */
-async function searchDuckDuckGoImages(query, count = 45, safeSearch = true) {
-  const kp = safeSearch ? '1' : '-2';
+async function searchDuckDuckGoImages(query, count = 45, safeSearch = true, gifMode = 'exclude') {
   const p = safeSearch ? '1' : '-1';
-  const pageRes = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images&kp=${kp}`, {
+  const f = gifMode === 'only' ? ',,,type:gif,' : ',,,';
+  const pageRes = await fetch(`https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`, {
     headers: { 'User-Agent': BROWSER_UA },
   });
   const html = await pageRes.text();
-  const vqdMatch = html.match(/vqd=([\d-]+)/) || html.match(/vqd="([^"]+)"/);
+  const vqdMatch = html.match(/vqd=['"]?([\d-]+)['"]?/);
   if (!vqdMatch) return [];
 
   const vqd = vqdMatch[1];
   const apiRes = await fetch(
-    `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(query)}&vqd=${encodeURIComponent(vqd)}&f=,,,&p=${p}`,
+    `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(query)}&vqd=${encodeURIComponent(vqd)}&f=${f}&p=${p}`,
     {
       headers: {
         'User-Agent': BROWSER_UA,
@@ -275,15 +329,37 @@ app.get('/api/search', async (req, res) => {
       rawImages = await searchGoogleCSE(effectiveQuery, googleApiKey, googleCx, fetchLimit, safeSearch);
       provider = 'google-cse';
     } else {
-      try {
-        rawImages = await searchGoogleImagesHTML(effectiveQuery, fetchLimit, safeSearch);
-      } catch (err) {
-        console.warn('Google HTML search failed, trying fallback:', err.message);
+      // For GIF-only or NSFW searches, Bing async supports native adlt=off and photo-animatedgif filters reliably
+      if (gifMode === 'only' || !safeSearch) {
+        try {
+          rawImages = await searchBingImages(effectiveQuery, fetchLimit, safeSearch, gifMode);
+          provider = 'bing';
+        } catch (err) {
+          console.warn('Bing search failed:', err.message);
+        }
       }
 
       if (rawImages.length === 0) {
         try {
-          rawImages = await searchDuckDuckGoImages(effectiveQuery, fetchLimit, safeSearch);
+          rawImages = await searchGoogleImagesHTML(effectiveQuery, fetchLimit, safeSearch);
+          provider = 'google';
+        } catch (err) {
+          console.warn('Google HTML search failed, trying fallback:', err.message);
+        }
+      }
+
+      if (rawImages.length === 0) {
+        try {
+          rawImages = await searchBingImages(effectiveQuery, fetchLimit, safeSearch, gifMode);
+          provider = 'bing';
+        } catch (err) {
+          console.warn('Bing fallback failed:', err.message);
+        }
+      }
+
+      if (rawImages.length === 0) {
+        try {
+          rawImages = await searchDuckDuckGoImages(effectiveQuery, fetchLimit, safeSearch, gifMode);
           provider = 'duckduckgo';
         } catch (err) {
           console.warn('DuckDuckGo fallback failed:', err.message);
@@ -296,9 +372,10 @@ app.get('/api/search', async (req, res) => {
       }
     }
 
-    let images = filterAndRankImages(rawImages, { gifMode, minDim: 480 });
+    const minDim = gifMode === 'only' ? 200 : 480;
+    let images = filterAndRankImages(rawImages, { gifMode, minDim });
     if (images.length < 3 && rawImages.length > 0) {
-      images = filterAndRankImages(rawImages, { gifMode, minDim: 300 });
+      images = filterAndRankImages(rawImages, { gifMode, minDim: 180 });
     }
     images = images.slice(0, count);
 

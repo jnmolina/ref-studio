@@ -400,7 +400,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
           )}
 
           {currentImage &&
-            /\.gif(\?|#|$)/i.test(currentImage.url) &&
+            (/\.gif(\?|#|$)/i.test(currentImage.url) || currentImage.source === 'bing-gif') &&
             currentImage.source !== 'gif-frame' && (
               <div
                 className="floating-gif-pill"

@@ -169,7 +169,56 @@ export async function clientSearchImages(options: {
   const combined: RefImage[] = [];
   const seen = new Set<string>();
 
-  if (gifMode !== 'only') {
+  // 2. Bing Images async via CORS proxy (supports SafeSearch OFF via adlt=off and animated GIFs via photo-animatedgif)
+  try {
+    const adlt = safeSearch ? 'strict' : 'off';
+    const qft = gifMode === 'only' ? '&qft=+filterui:photo-animatedgif' : '';
+    const bingTarget = `https://www.bing.com/images/async?q=${encodeURIComponent(
+      effectiveQuery
+    )}&first=0&count=45&adlt=${adlt}${qft}`;
+
+    const bingRes = await fetch(`https://api.cors.lol/?url=${encodeURIComponent(bingTarget)}`);
+    if (bingRes.ok) {
+      const html = await bingRes.text();
+      const cardRegex = /\bm="(\{&quot;[^"]+\})"/g;
+      let m;
+      while ((m = cardRegex.exec(html)) !== null && combined.length < count) {
+        try {
+          const decoded = m[1]
+            .replace(/&quot;/g, '"')
+            .replace(/&amp;/g, '&')
+            .replace(/&#39;/g, "'");
+          const meta = JSON.parse(decoded);
+          const imgUrl: string = meta.murl;
+          if (!imgUrl || !/^https?:\/\//i.test(imgUrl) || seen.has(imgUrl)) continue;
+          if (VIDEO_URL_RE.test(imgUrl)) continue;
+          const isGif = GIF_URL_RE.test(imgUrl) || gifMode === 'only';
+          if (gifMode === 'exclude' && isGif) continue;
+          if (gifMode === 'only' && !isGif) continue;
+
+          seen.add(imgUrl);
+          combined.push({
+            id: `bing-${Date.now()}-${combined.length}-${Math.random().toString(36).slice(2, 6)}`,
+            url: imgUrl,
+            pageUrl: meta.purl || imgUrl,
+            thumbnail: meta.turl || imgUrl,
+            title: (meta.t || query).replace(/[\uE000-\uF8FF]/g, '').trim() || query,
+            width: 900,
+            height: 900,
+            source: isGif ? 'bing-gif' : 'bing',
+            addedAt: Date.now(),
+          });
+        } catch {
+          // ignore malformed card
+        }
+      }
+    }
+  } catch {
+    // Fall through to Openverse & Wikimedia
+  }
+
+  // 3. Openverse API (CORS-enabled creative commons & reference photos)
+  if (combined.length < count && gifMode !== 'only') {
     try {
       const ovUrl = new URL('https://api.openverse.org/v1/images/');
       ovUrl.searchParams.set('q', query);
@@ -324,9 +373,9 @@ export async function clientFetchPinterest(
 
   if (images.length === 0) {
     const proxies = [
+      `https://api.cors.lol/?url=${encodeURIComponent(boardUrl)}`,
       `https://api.allorigins.win/raw?url=${encodeURIComponent(boardUrl)}`,
       `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(boardUrl)}`,
-      `https://corsproxy.io/?${encodeURIComponent(boardUrl)}`,
     ];
 
     for (const proxyUrl of proxies) {
@@ -452,9 +501,9 @@ export async function clientExtractUrlImages(
     const randPage = random ? Math.floor(Math.random() * 85) + 1 : 1;
     const wpApiUrl = `${origin}/wp-json/wp/v2/media?per_page=50&page=${randPage}`;
     const wpProxies = [
+      `https://api.cors.lol/?url=${encodeURIComponent(wpApiUrl)}`,
       `https://api.allorigins.win/raw?url=${encodeURIComponent(wpApiUrl)}`,
       `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(wpApiUrl)}`,
-      `https://corsproxy.io/?${encodeURIComponent(wpApiUrl)}`,
     ];
     for (const pUrl of wpProxies) {
       try {
@@ -499,9 +548,9 @@ export async function clientExtractUrlImages(
 
   // 3. Generic webpage HTML extraction
   const proxies = [
+    `https://api.cors.lol/?url=${encodeURIComponent(trimmed)}`,
     `https://api.allorigins.win/raw?url=${encodeURIComponent(trimmed)}`,
     `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(trimmed)}`,
-    `https://corsproxy.io/?${encodeURIComponent(trimmed)}`,
   ];
 
   let html = '';
