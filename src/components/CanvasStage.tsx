@@ -41,6 +41,7 @@ interface CanvasStageProps {
   stageRef: React.RefObject<HTMLDivElement | null>;
   drawCanvasRef: React.RefObject<HTMLCanvasElement | null>;
   onQuickTheme: (theme: string) => void;
+  onRandomSitePull: (siteUrl: string) => void;
   onUnpackGif: (replaceTimeline: boolean) => void;
   gifExtractProgress: string | null;
   isLiked: boolean;
@@ -139,6 +140,7 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
   stageRef,
   drawCanvasRef,
   onQuickTheme,
+  onRandomSitePull,
   onUnpackGif,
   gifExtractProgress,
   isLiked,
@@ -354,6 +356,24 @@ export const CanvasStage: React.FC<CanvasStageProps> = ({
                 {t}
               </button>
             ))}
+          </div>
+          <div className="quick-themes" style={{ marginTop: 12 }}>
+            <button
+              className="pill-lg"
+              style={{ borderColor: 'var(--accent)', color: '#93c5fd' }}
+              onClick={() => onRandomSitePull('https://livlily.blogspot.com/')}
+              title="Pull random animation model sheets & drawings from Living Lines Library"
+            >
+              🎲 Random Living Lines (livlily.blogspot.com)
+            </button>
+            <button
+              className="pill-lg"
+              style={{ borderColor: 'var(--accent)', color: '#93c5fd' }}
+              onClick={() => onRandomSitePull('https://film-grab.com/')}
+              title="Pull random movie stills for composition & lighting study from Film-Grab"
+            >
+              🎲 Random Film-Grab (film-grab.com)
+            </button>
           </div>
         </div>
       ) : (

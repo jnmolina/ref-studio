@@ -25,6 +25,7 @@ import {
   Clock,
   PanelRight,
   Link2,
+  Dices,
 } from 'lucide-react';
 import { GifMode, GoldenSite } from '../types';
 import { detectInputKind } from '../utils/clientSearch';
@@ -63,6 +64,7 @@ interface TopBarProps {
   onGifModeChange: (m: GifMode) => void;
   onOpenVideoModal: () => void;
   onOpenLinkModal: () => void;
+  onRandomPull: () => void;
   goldenSites: GoldenSite[];
   searchScope: string;
   onSearchScopeChange: (scope: string) => void;
@@ -118,6 +120,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onGifModeChange,
   onOpenVideoModal,
   onOpenLinkModal,
+  onRandomPull,
   goldenSites,
   searchScope,
   onSearchScopeChange,
@@ -192,6 +195,17 @@ export const TopBar: React.FC<TopBarProps> = ({
             {isSearching ? <Loader2 size={14} className="spin" /> : submitLabel}
           </button>
         </form>
+
+        <button
+          type="button"
+          className="btn btn-sm btn-ghost"
+          onClick={onRandomPull}
+          disabled={isSearching}
+          title="Pull random practice images from the current URL/board or your Golden List (Living Lines, Film-Grab, etc.)"
+        >
+          <Dices size={13} />
+          <span>Random</span>
+        </button>
 
         <button
           type="button"

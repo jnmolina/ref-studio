@@ -43,6 +43,7 @@ import {
   clientSearchImages,
   detectInputKind,
   isStaticHost,
+  shuffleArray,
 } from './utils/clientSearch';
 
 const DEFAULT_TRANSFORM: TransformSettings = {
@@ -163,18 +164,28 @@ export function App() {
 
   // Golden List of favorite reference sites (URL/domain list only)
   const [goldenSites, setGoldenSites] = useState<GoldenSite[]>(() => {
-    try {
-      const saved = localStorage.getItem('refstudio_golden_sites');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
-    return [
+    const defaultSites: GoldenSite[] = [
+      { id: 'gs-livlily', name: 'Living Lines Library', domain: 'livlily.blogspot.com', group: 'Animation & Model Sheets' },
+      { id: 'gs-filmgrab', name: 'Film-Grab', domain: 'film-grab.com', group: 'Film & Composition' },
       { id: 'gs-1', name: 'Line of Action', domain: 'line-of-action.com', group: 'Poses & Anatomy' },
       { id: 'gs-2', name: 'QuickPoses', domain: 'quickposes.com', group: 'Poses & Anatomy' },
       { id: 'gs-3', name: 'Pinterest', domain: 'pinterest.com', group: 'General Reference' },
       { id: 'gs-4', name: 'Wikimedia Commons', domain: 'commons.wikimedia.org', group: 'Open Archive' },
     ];
+    try {
+      const saved = localStorage.getItem('refstudio_golden_sites');
+      if (saved) {
+        const parsed: GoldenSite[] = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          const existingDomains = new Set(parsed.map((s) => s.domain.toLowerCase()));
+          const missing = defaultSites.filter((d) => !existingDomains.has(d.domain.toLowerCase()));
+          return [...missing, ...parsed];
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return defaultSites;
   });
   const [searchScope, setSearchScope] = useState<string>('all');
   const [showGoldenModal, setShowGoldenModal] = useState(false);
@@ -214,7 +225,7 @@ export function App() {
   })();
 
   const executeSearch = useCallback(
-    async (searchTerm: string, mode: 'replace' | 'append') => {
+    async (searchTerm: string, mode: 'replace' | 'append', isRandom = false) => {
       setIsSearching(true);
       setSearchError(null);
       try {
@@ -238,34 +249,42 @@ export function App() {
 
         let fetchedImages: RefImage[] = [];
         let activeProvider = 'web';
+        const randParam = isRandom ? '&random=true' : '';
 
         if (kind === 'pinterest') {
           activeProvider = 'pinterest';
           if (isStaticHost()) {
-            fetchedImages = await clientFetchPinterest(searchTerm, 60);
+            fetchedImages = await clientFetchPinterest(searchTerm, 60, isRandom);
           } else {
             try {
-              const res = await fetch(`/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60`);
+              const res = await fetch(
+                `/api/pinterest?url=${encodeURIComponent(searchTerm)}&count=60${randParam}`
+              );
               const data = await res.json();
               if (!res.ok) throw new Error(data.error || 'Pinterest fetch failed');
               fetchedImages = data.images || [];
             } catch {
-              fetchedImages = await clientFetchPinterest(searchTerm, 60);
+              fetchedImages = await clientFetchPinterest(searchTerm, 60, isRandom);
             }
           }
         } else if (kind === 'image-url' || kind === 'web-url') {
+          const normalizedUrl = /^https?:\/\//i.test(searchTerm.trim())
+            ? searchTerm.trim()
+            : `https://${searchTerm.trim()}`;
           activeProvider = kind === 'image-url' ? 'direct-link' : 'web-link';
           if (isStaticHost()) {
-            fetchedImages = await clientExtractUrlImages(searchTerm, 50);
+            fetchedImages = await clientExtractUrlImages(normalizedUrl, 50, isRandom);
           } else {
             try {
-              const res = await fetch(`/api/extract-url?url=${encodeURIComponent(searchTerm)}&count=50`);
+              const res = await fetch(
+                `/api/extract-url?url=${encodeURIComponent(normalizedUrl)}&count=50${randParam}`
+              );
               const data = await res.json();
               if (!res.ok) throw new Error(data.error || 'Link extraction failed');
               fetchedImages = data.images || [];
               activeProvider = data.provider || activeProvider;
             } catch {
-              fetchedImages = await clientExtractUrlImages(searchTerm, 50);
+              fetchedImages = await clientExtractUrlImages(normalizedUrl, 50, isRandom);
             }
           }
         } else if (isStaticHost()) {
@@ -277,6 +296,7 @@ export function App() {
             sites: scopedSites,
             googleApiKey,
             googleCx,
+            random: isRandom,
           });
           fetchedImages = res.images;
           activeProvider = res.provider;
@@ -289,7 +309,7 @@ export function App() {
           );
           const data = await res.json();
           if (!res.ok) throw new Error(data.error || 'Search failed');
-          fetchedImages = data.images || [];
+          fetchedImages = isRandom ? shuffleArray(data.images || []) : data.images || [];
           activeProvider = data.provider || 'google';
         }
 
@@ -358,7 +378,7 @@ export function App() {
     [images.length, executeSearch]
   );
 
-  const handleLoadLinksModal = async (mode: 'replace' | 'append') => {
+  const handleLoadLinksModal = async (mode: 'replace' | 'append', isRandom = false) => {
     const lines = linkInputText
       .split(/\r?\n/)
       .map((l) => l.trim())
@@ -368,15 +388,41 @@ export function App() {
     setShowLinkModal(false);
     if (lines.length === 1) {
       setQuery(lines[0]);
-      await executeSearch(lines[0], mode);
+      await executeSearch(lines[0], mode, isRandom);
       return;
     }
 
-    // Multiple lines: load each image/link or board in order
-    for (let i = 0; i < lines.length; i++) {
-      await executeSearch(lines[i], i === 0 ? mode : 'append');
+    const orderedLines = isRandom ? shuffleArray(lines) : lines;
+    for (let i = 0; i < orderedLines.length; i++) {
+      await executeSearch(orderedLines[i], i === 0 ? mode : 'append', isRandom);
     }
   };
+
+  const handleRandomSitePull = useCallback(
+    (targetUrl?: string) => {
+      const explicit = (targetUrl || query).trim();
+      if (explicit && detectInputKind(explicit) !== 'video') {
+        setQuery(explicit);
+        executeSearch(explicit, 'replace', true);
+        return;
+      }
+
+      if (searchScope.startsWith('site:')) {
+        const domain = searchScope.slice(5);
+        const url = `https://${domain}`;
+        setQuery(url);
+        executeSearch(url, 'replace', true);
+        return;
+      }
+
+      // Pick randomly between Living Lines Library and Film-Grab (or any Golden List site)
+      const directPracticeSites = ['https://livlily.blogspot.com/', 'https://film-grab.com/'];
+      const picked = directPracticeSites[Math.floor(Math.random() * directPracticeSites.length)];
+      setQuery(picked);
+      executeSearch(picked, 'replace', true);
+    },
+    [query, searchScope, executeSearch]
+  );
 
   const goToIndex = useCallback(
     (idx: number) => {
@@ -857,6 +903,7 @@ export function App() {
           setShowVideoModal(true);
         }}
         onOpenLinkModal={() => setShowLinkModal(true)}
+        onRandomPull={() => handleRandomSitePull()}
         goldenSites={goldenSites}
         searchScope={searchScope}
         onSearchScopeChange={setSearchScope}
@@ -920,6 +967,7 @@ export function App() {
               setQuery(t);
               handleSearch(t);
             }}
+            onRandomSitePull={(siteUrl) => handleRandomSitePull(siteUrl)}
             onUnpackGif={handleUnpackGif}
             gifExtractProgress={gifExtractProgress}
             isLiked={Boolean(currentImage && likedUrls[currentImage.url])}
@@ -1021,7 +1069,21 @@ export function App() {
             </label>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              <span className="mini-label">Quick examples:</span>
+              <span className="mini-label">Practice sites &amp; boards:</span>
+              <button
+                type="button"
+                className="pill"
+                onClick={() => setLinkInputText('https://livlily.blogspot.com/')}
+              >
+                Living Lines (livlily.blogspot.com)
+              </button>
+              <button
+                type="button"
+                className="pill"
+                onClick={() => setLinkInputText('https://film-grab.com/')}
+              >
+                Film-Grab (film-grab.com)
+              </button>
               <button
                 type="button"
                 className="pill"
@@ -1029,36 +1091,35 @@ export function App() {
               >
                 Sample Pinterest Board
               </button>
-              <button
-                type="button"
-                className="pill"
-                onClick={() =>
-                  setLinkInputText('https://en.wikipedia.org/wiki/Eadweard_Muybridge')
-                }
-              >
-                Muybridge Motion Page
-              </button>
             </div>
 
             <div className="modal-actions">
               <button className="btn btn-ghost" onClick={() => setShowLinkModal(false)}>
                 Cancel
               </button>
+              <button
+                className="btn btn-accent"
+                disabled={!linkInputText.trim() || isSearching}
+                onClick={() => handleLoadLinksModal('replace', true)}
+                title="Pull a random shuffled selection from this site or board"
+              >
+                🎲 Pull Random
+              </button>
               {images.length > 0 && (
                 <button
                   className="btn btn-ghost"
                   disabled={!linkInputText.trim() || isSearching}
-                  onClick={() => handleLoadLinksModal('append')}
+                  onClick={() => handleLoadLinksModal('append', false)}
                 >
-                  Append to Session
+                  Append
                 </button>
               )}
               <button
                 className="btn btn-primary"
                 disabled={!linkInputText.trim() || isSearching}
-                onClick={() => handleLoadLinksModal('replace')}
+                onClick={() => handleLoadLinksModal('replace', false)}
               >
-                {images.length > 0 ? 'Replace Session' : 'Load into Session'}
+                {images.length > 0 ? 'Replace Session' : 'Load All'}
               </button>
             </div>
           </div>
@@ -1227,6 +1288,7 @@ export function App() {
         onSaveSites={setGoldenSites}
         activeScope={searchScope}
         onSelectScope={setSearchScope}
+        onRandomPullFromSite={(siteUrl) => handleRandomSitePull(siteUrl)}
       />
     </div>
   );

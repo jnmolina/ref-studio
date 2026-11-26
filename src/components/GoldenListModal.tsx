@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Plus, Pencil, Trash2, ExternalLink, Search, Check, Star, Folder } from 'lucide-react';
+import { X, Plus, Pencil, Trash2, ExternalLink, Search, Check, Star, Folder, Dices } from 'lucide-react';
 import { GoldenSite } from '../types';
 
 interface GoldenListModalProps {
@@ -9,6 +9,7 @@ interface GoldenListModalProps {
   onSaveSites: (sites: GoldenSite[]) => void;
   activeScope: string;
   onSelectScope: (scope: string) => void;
+  onRandomPullFromSite: (domain: string) => void;
 }
 
 export function normalizeDomain(input: string): string {
@@ -33,6 +34,7 @@ export const GoldenListModal: React.FC<GoldenListModalProps> = ({
   onSaveSites,
   activeScope,
   onSelectScope,
+  onRandomPullFromSite,
 }) => {
   const [nameInput, setNameInput] = useState('');
   const [domainInput, setDomainInput] = useState('');
@@ -259,6 +261,17 @@ export const GoldenListModal: React.FC<GoldenListModalProps> = ({
                           <span className="golden-site-domain">{site.domain}</span>
                         </div>
                         <div className="golden-site-actions">
+                          <button
+                            className="pill active"
+                            onClick={() => {
+                              onRandomPullFromSite(`https://${site.domain}`);
+                              onClose();
+                            }}
+                            title={`Pull random practice images directly from ${site.domain}`}
+                          >
+                            <Dices size={11} style={{ marginRight: 3 }} />
+                            Random Pull
+                          </button>
                           <button
                             className={`pill ${activeScope === siteScope ? 'active' : ''}`}
                             onClick={() => {

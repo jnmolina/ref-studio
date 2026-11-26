@@ -511,6 +511,13 @@ app.get('/api/pinterest', async (req, res) => {
       }
     }
 
+    if (String(req.query.random || '') === 'true') {
+      for (let i = images.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [images[i], images[j]] = [images[j], images[i]];
+      }
+    }
+
     return res.json({
       url: boardUrl,
       provider: 'pinterest',
@@ -522,13 +529,23 @@ app.get('/api/pinterest', async (req, res) => {
   }
 });
 
+function shuffleInPlace(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 /**
- * Extract reference images from any webpage link or direct image URL (in-memory only, zero storage).
+ * Extract reference images from any webpage link, Blogger archive (e.g. livlily.blogspot.com),
+ * WordPress media archive (e.g. film-grab.com), or direct image URL (in-memory only, zero storage).
  */
 app.get('/api/extract-url', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const targetUrl = String(req.query.url || '').trim();
   const count = Math.min(parseInt(String(req.query.count || '40'), 10) || 40, 80);
+  const isRandom = String(req.query.random || '') === 'true';
 
   if (!targetUrl || !/^https?:\/\//i.test(targetUrl)) {
     return res.status(400).json({ error: 'Please enter a valid http(s) URL.' });
@@ -557,6 +574,126 @@ app.get('/api/extract-url', async (req, res) => {
   }
 
   try {
+    const parsedTarget = new URL(targetUrl);
+    const origin = parsedTarget.origin;
+
+    // 1. Blogger / Blogspot sites (e.g. livlily.blogspot.com) — use Blogger JSON feed API for deep random pulls
+    if (/\.blogspot\.[a-z.]+$/i.test(parsedTarget.hostname)) {
+      try {
+        let startIndex = 1;
+        if (isRandom) {
+          const metaRes = await fetch(`${origin}/feeds/posts/default?alt=json&max-results=1`, {
+            headers: { 'User-Agent': BROWSER_UA },
+          });
+          if (metaRes.ok) {
+            const metaJson = await metaRes.json();
+            const total = parseInt(metaJson?.feed?.['openSearch$totalResults']?.['$t'] || '1', 10) || 1;
+            if (total > 15) {
+              startIndex = Math.floor(Math.random() * Math.max(1, total - 15)) + 1;
+            }
+          }
+        }
+        const feedRes = await fetch(
+          `${origin}/feeds/posts/default?alt=json&start-index=${startIndex}&max-results=25`,
+          { headers: { 'User-Agent': BROWSER_UA } }
+        );
+        if (feedRes.ok) {
+          const feedJson = await feedRes.json();
+          const entries = feedJson?.feed?.entry || [];
+          const blogImages = [];
+          const seenBlog = new Set();
+
+          for (const entry of entries) {
+            const postTitle = entry?.title?.['$t'] || 'Blog Reference';
+            const altLink = (entry?.link || []).find((l) => l.rel === 'alternate')?.href || targetUrl;
+            const htmlContent = entry?.content?.['$t'] || entry?.summary?.['$t'] || '';
+            const imgRegex = /https?:\/\/[^"'\s<>]+\.(?:jpg|jpeg|png|webp|gif)/gi;
+            let m;
+            while ((m = imgRegex.exec(htmlContent)) !== null) {
+              const rawImg = m[0];
+              if (/(favicon|icon|avatar|badge|tracker|1x1)/i.test(rawImg)) continue;
+              const hiRes = rawImg
+                .replace(/\/s\d+(-[a-z]+)?\//i, '/s1600/')
+                .replace(/=s\d+(-[a-z]+)?$/i, '=s1600');
+              if (seenBlog.has(hiRes)) continue;
+              seenBlog.add(hiRes);
+              blogImages.push({
+                id: `blog-${Date.now()}-${blogImages.length}-${Math.random().toString(36).slice(2, 6)}`,
+                url: hiRes,
+                pageUrl: altLink,
+                thumbnail: rawImg,
+                title: postTitle,
+                width: 1200,
+                height: 900,
+                source: parsedTarget.hostname,
+              });
+            }
+          }
+
+          if (blogImages.length > 0) {
+            if (isRandom) shuffleInPlace(blogImages);
+            const sliced = blogImages.slice(0, count);
+            return res.json({
+              url: targetUrl,
+              provider: parsedTarget.hostname,
+              count: sliced.length,
+              images: sliced,
+            });
+          }
+        }
+      } catch {
+        // Fall through to standard HTML extraction
+      }
+    }
+
+    // 2. WordPress sites (e.g. film-grab.com) — use /wp-json/wp/v2/media for deep random film stills
+    if (/film-grab\.com$/i.test(parsedTarget.hostname) || isRandom) {
+      try {
+        const randPage = isRandom ? Math.floor(Math.random() * 85) + 1 : 1;
+        const wpRes = await fetch(`${origin}/wp-json/wp/v2/media?per_page=50&page=${randPage}`, {
+          headers: { 'User-Agent': BROWSER_UA },
+        });
+        if (wpRes.ok && (wpRes.headers.get('content-type') || '').includes('json')) {
+          const mediaItems = await wpRes.json();
+          if (Array.isArray(mediaItems) && mediaItems.length > 0) {
+            const wpImages = [];
+            for (const item of mediaItems) {
+              const srcUrl =
+                item?.media_details?.sizes?.full?.source_url ||
+                item?.source_url ||
+                item?.guid?.rendered;
+              if (!srcUrl || !/\.(jpg|jpeg|png|webp)/i.test(srcUrl)) continue;
+              const thumbUrl =
+                item?.media_details?.sizes?.medium_large?.source_url ||
+                item?.media_details?.sizes?.medium?.source_url ||
+                srcUrl;
+              wpImages.push({
+                id: `wp-${Date.now()}-${wpImages.length}-${Math.random().toString(36).slice(2, 6)}`,
+                url: srcUrl,
+                pageUrl: item?.link || targetUrl,
+                thumbnail: thumbUrl,
+                title: (item?.title?.rendered || 'Film Still').replace(/&#8211;|&#8212;/g, '—'),
+                width: item?.media_details?.width || 1280,
+                height: item?.media_details?.height || 720,
+                source: parsedTarget.hostname.replace(/^www\./, ''),
+              });
+            }
+            if (wpImages.length > 0) {
+              if (isRandom) shuffleInPlace(wpImages);
+              const sliced = wpImages.slice(0, count);
+              return res.json({
+                url: targetUrl,
+                provider: parsedTarget.hostname.replace(/^www\./, ''),
+                count: sliced.length,
+                images: sliced,
+              });
+            }
+          }
+        }
+      } catch {
+        // Fall through to standard HTML extraction
+      }
+    }
     const pageRes = await fetch(targetUrl, {
       redirect: 'follow',
       headers: {
@@ -640,6 +777,8 @@ app.get('/api/extract-url', async (req, res) => {
     while ((m = rawImgRegex.exec(html)) !== null && images.length < count) {
       addImage(m[0]);
     }
+
+    if (isRandom) shuffleInPlace(images);
 
     return res.json({
       url: targetUrl,

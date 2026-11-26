@@ -7,6 +7,15 @@ const GIF_URL_RE = /\.gif(\?|#|$)/i;
 
 export type InputKind = 'video' | 'pinterest' | 'image-url' | 'web-url' | 'search';
 
+export function shuffleArray<T>(arr: T[]): T[] {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export function detectInputKind(raw: string): InputKind {
   const s = raw.trim();
   if (!s) return 'search';
@@ -31,13 +40,17 @@ export function detectInputKind(raw: string): InputKind {
   if (
     /^https?:\/\/([a-z0-9-]+\.)?(pinterest\.[a-z.]+|pin\.it)\//i.test(s) ||
     /^(www\.)?pinterest\.[a-z.]+\/[^/\s]+\/[^/\s]+/i.test(s) ||
-    (/^[a-zA-Z0-9_.-]{2,40}\/[a-zA-Z0-9_.-]{2,60}\/?$/.test(s) && !/\.(com|org|net|io|edu|gov)\//i.test(s))
+    (/^[a-zA-Z0-9_.-]{2,40}\/[a-zA-Z0-9_.-]{2,60}\/?$/.test(s) &&
+      !/\.(com|org|net|io|edu|gov)\//i.test(s))
   ) {
     return 'pinterest';
   }
 
-  // 4. Any other web page URL
-  if (/^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(s)) {
+  // 4. Any other web page URL or domain (e.g. livlily.blogspot.com, film-grab.com)
+  if (
+    /^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(s) ||
+    /^[a-z0-9-]+\.(blogspot\.com|com|org|net|io)(\/.*)?$/i.test(s)
+  ) {
     return 'web-url';
   }
 
@@ -46,6 +59,40 @@ export function detectInputKind(raw: string): InputKind {
 
 export function isStaticHost(): boolean {
   return typeof window !== 'undefined' && window.location.hostname.endsWith('github.io');
+}
+
+/**
+ * Native browser JSONP fetcher for Blogger/Blogspot sites (e.g. livlily.blogspot.com).
+ * Works 100% client-side on GitHub Pages without any CORS proxy!
+ */
+function fetchBloggerJsonp(origin: string, startIndex: number, maxResults: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const cbName = `__blogger_cb_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const script = document.createElement('script');
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('Blogger feed timeout'));
+    }, 10000);
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      delete (window as any)[cbName];
+      script.remove();
+    };
+
+    (window as any)[cbName] = (data: any) => {
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error('Blogger JSONP script failed'));
+    };
+
+    script.src = `${origin}/feeds/posts/default?alt=json-in-script&callback=${cbName}&start-index=${startIndex}&max-results=${maxResults}`;
+    document.head.appendChild(script);
+  });
 }
 
 /**
@@ -59,6 +106,7 @@ export async function clientSearchImages(options: {
   sites?: string[];
   googleApiKey?: string;
   googleCx?: string;
+  random?: boolean;
 }): Promise<{ provider: string; images: RefImage[] }> {
   const {
     query,
@@ -68,6 +116,7 @@ export async function clientSearchImages(options: {
     sites = [],
     googleApiKey,
     googleCx,
+    random = false,
   } = options;
 
   const siteClause =
@@ -79,7 +128,6 @@ export async function clientSearchImages(options: {
   const baseQuery = gifMode === 'only' ? `${query} gif` : query;
   const effectiveQuery = siteClause ? `${baseQuery} ${siteClause}` : baseQuery;
 
-  // 1. Google Custom Search JSON API (supports direct browser CORS)
   if (googleApiKey && googleCx) {
     const results: RefImage[] = [];
     for (let page = 0; page < 3 && results.length < count; page++) {
@@ -114,14 +162,13 @@ export async function clientSearchImages(options: {
       }
     }
     if (results.length > 0) {
-      return { provider: 'google-cse', images: results };
+      return { provider: 'google-cse', images: random ? shuffleArray(results) : results };
     }
   }
 
   const combined: RefImage[] = [];
   const seen = new Set<string>();
 
-  // 2. Openverse API (CORS-enabled creative commons & reference photos)
   if (gifMode !== 'only') {
     try {
       const ovUrl = new URL('https://api.openverse.org/v1/images/');
@@ -155,7 +202,6 @@ export async function clientSearchImages(options: {
     }
   }
 
-  // 3. Wikimedia Commons API (CORS-enabled via origin=*, supports photos & animated GIFs)
   try {
     const wikiQuery = gifMode === 'only' ? `${query} filetype:gif` : query;
     const wikiUrl = `https://commons.wikimedia.org/w/api.php?action=query&generator=search&gsrnamespace=6&gsrsearch=${encodeURIComponent(
@@ -172,7 +218,10 @@ export async function clientSearchImages(options: {
         const isGif = info.mime.includes('gif') || GIF_URL_RE.test(info.url);
         if (gifMode === 'exclude' && isGif) continue;
         if (gifMode === 'only' && !isGif) continue;
-        if (gifMode !== 'only' && ((info.width && info.width < 400) || (info.height && info.height < 400))) {
+        if (
+          gifMode !== 'only' &&
+          ((info.width && info.width < 400) || (info.height && info.height < 400))
+        ) {
           continue;
         }
         seen.add(info.url);
@@ -195,9 +244,10 @@ export async function clientSearchImages(options: {
     // ignore
   }
 
+  const finalImages = random ? shuffleArray(combined) : combined;
   return {
-    provider: combined[0]?.source || 'web',
-    images: combined.slice(0, count),
+    provider: finalImages[0]?.source || 'web',
+    images: finalImages.slice(0, count),
   };
 }
 
@@ -205,7 +255,11 @@ export async function clientSearchImages(options: {
  * Fetch Pinterest board pins directly in the browser using Pinterest's CORS-enabled Pidgets API,
  * with HTML proxy fallback for single pins or board sections.
  */
-export async function clientFetchPinterest(rawInput: string, count = 50): Promise<RefImage[]> {
+export async function clientFetchPinterest(
+  rawInput: string,
+  count = 50,
+  random = false
+): Promise<RefImage[]> {
   let boardUrl = rawInput.trim();
   if (!/^https?:\/\//i.test(boardUrl)) {
     const cleanPath = boardUrl
@@ -215,7 +269,7 @@ export async function clientFetchPinterest(rawInput: string, count = 50): Promis
   }
 
   const seenKeys = new Set<string>();
-  const images: RefImage[] = [];
+  let images: RefImage[] = [];
 
   const addPin = (rawUrl: string, title = '', pinId = '') => {
     if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return;
@@ -239,7 +293,6 @@ export async function clientFetchPinterest(rawInput: string, count = 50): Promis
     });
   };
 
-  // 1. Direct CORS call to Pinterest Pidgets API (Access-Control-Allow-Origin: *)
   try {
     const parsed = new URL(boardUrl);
     const segs = parsed.pathname.split('/').filter(Boolean);
@@ -252,7 +305,6 @@ export async function clientFetchPinterest(rawInput: string, count = 50): Promis
       if (pidgetRes.ok) {
         const pidgetData = await pidgetRes.json();
         for (const pin of pidgetData?.data?.pins || []) {
-          if (images.length >= count) break;
           const imgObj = pin?.images || {};
           const best =
             imgObj['736x']?.url ||
@@ -270,32 +322,29 @@ export async function clientFetchPinterest(rawInput: string, count = 50): Promis
     // Fall through to HTML proxy fallback
   }
 
-  if (images.length > 0) {
-    return images;
-  }
+  if (images.length === 0) {
+    const proxies = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(boardUrl)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(boardUrl)}`,
+      `https://corsproxy.io/?${encodeURIComponent(boardUrl)}`,
+    ];
 
-  // 2. HTML proxy fallback (for single pins or board sections)
-  const proxies = [
-    `https://api.allorigins.win/raw?url=${encodeURIComponent(boardUrl)}`,
-    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(boardUrl)}`,
-    `https://corsproxy.io/?${encodeURIComponent(boardUrl)}`,
-  ];
-
-  for (const proxyUrl of proxies) {
-    try {
-      const res = await fetch(proxyUrl);
-      if (res.ok) {
-        const html = await res.text();
-        const pinRegex =
-          /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x|236x)\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]+\.(?:jpg|jpeg|png|webp|gif)/gi;
-        let m;
-        while ((m = pinRegex.exec(html)) !== null && images.length < count) {
-          addPin(m[0]);
+    for (const proxyUrl of proxies) {
+      try {
+        const res = await fetch(proxyUrl);
+        if (res.ok) {
+          const html = await res.text();
+          const pinRegex =
+            /https:\/\/i\.pinimg\.com\/(?:originals|736x|564x|474x|236x)\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]{2}\/[a-f0-9]+\.(?:jpg|jpeg|png|webp|gif)/gi;
+          let m;
+          while ((m = pinRegex.exec(html)) !== null && images.length < count) {
+            addPin(m[0]);
+          }
+          if (images.length > 0) break;
         }
-        if (images.length > 0) break;
+      } catch {
+        // try next proxy
       }
-    } catch {
-      // try next proxy
     }
   }
 
@@ -305,14 +354,24 @@ export async function clientFetchPinterest(rawInput: string, count = 50): Promis
     );
   }
 
-  return images;
+  if (random) images = shuffleArray(images);
+  return images.slice(0, count);
 }
 
 /**
- * Extract images from any direct image URL or public webpage link in browser mode.
+ * Extract images from any direct image URL, Blogger archive (e.g. livlily.blogspot.com),
+ * WordPress media archive (e.g. film-grab.com), or public webpage link in browser mode.
  */
-export async function clientExtractUrlImages(targetUrl: string, count = 40): Promise<RefImage[]> {
-  const trimmed = targetUrl.trim();
+export async function clientExtractUrlImages(
+  rawUrl: string,
+  count = 40,
+  random = false
+): Promise<RefImage[]> {
+  let trimmed = rawUrl.trim();
+  if (!/^https?:\/\//i.test(trimmed)) {
+    trimmed = `https://${trimmed}`;
+  }
+
   if (
     /\.(jpg|jpeg|png|webp|gif|avif)(\?|#|$)/i.test(trimmed) ||
     /^https?:\/\/i\.pinimg\.com\//i.test(trimmed)
@@ -333,6 +392,112 @@ export async function clientExtractUrlImages(targetUrl: string, count = 40): Pro
     ];
   }
 
+  const parsedTarget = new URL(trimmed);
+  const origin = parsedTarget.origin;
+
+  // 1. Native JSONP for Blogger / Blogspot sites (e.g. livlily.blogspot.com)
+  if (/\.blogspot\.[a-z.]+$/i.test(parsedTarget.hostname)) {
+    try {
+      let startIndex = 1;
+      if (random) {
+        const meta = await fetchBloggerJsonp(origin, 1, 1);
+        const total = parseInt(meta?.feed?.['openSearch$totalResults']?.['$t'] || '1', 10) || 1;
+        if (total > 15) {
+          startIndex = Math.floor(Math.random() * Math.max(1, total - 15)) + 1;
+        }
+      }
+      const feedData = await fetchBloggerJsonp(origin, startIndex, 25);
+      const entries = feedData?.feed?.entry || [];
+      let blogImages: RefImage[] = [];
+      const seenBlog = new Set<string>();
+
+      for (const entry of entries) {
+        const postTitle = entry?.title?.['$t'] || 'Blog Reference';
+        const altLink = (entry?.link || []).find((l: any) => l.rel === 'alternate')?.href || trimmed;
+        const htmlContent = entry?.content?.['$t'] || entry?.summary?.['$t'] || '';
+        const imgRegex = /https?:\/\/[^"'\s<>]+\.(?:jpg|jpeg|png|webp|gif)/gi;
+        let m;
+        while ((m = imgRegex.exec(htmlContent)) !== null) {
+          const rawImg = m[0];
+          if (/(favicon|icon|avatar|badge|tracker|1x1)/i.test(rawImg)) continue;
+          const hiRes = rawImg
+            .replace(/\/s\d+(-[a-z]+)?\//i, '/s1600/')
+            .replace(/=s\d+(-[a-z]+)?$/i, '=s1600');
+          if (seenBlog.has(hiRes)) continue;
+          seenBlog.add(hiRes);
+          blogImages.push({
+            id: `blog-${Date.now()}-${blogImages.length}-${Math.random().toString(36).slice(2, 6)}`,
+            url: hiRes,
+            pageUrl: altLink,
+            thumbnail: rawImg,
+            title: postTitle,
+            width: 1200,
+            height: 900,
+            source: parsedTarget.hostname,
+            addedAt: Date.now(),
+          });
+        }
+      }
+      if (blogImages.length > 0) {
+        if (random) blogImages = shuffleArray(blogImages);
+        return blogImages.slice(0, count);
+      }
+    } catch {
+      // Fall through to proxy HTML extraction
+    }
+  }
+
+  // 2. WordPress REST API via CORS proxy (e.g. film-grab.com)
+  if (/film-grab\.com$/i.test(parsedTarget.hostname)) {
+    const randPage = random ? Math.floor(Math.random() * 85) + 1 : 1;
+    const wpApiUrl = `${origin}/wp-json/wp/v2/media?per_page=50&page=${randPage}`;
+    const wpProxies = [
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(wpApiUrl)}`,
+      `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(wpApiUrl)}`,
+      `https://corsproxy.io/?${encodeURIComponent(wpApiUrl)}`,
+    ];
+    for (const pUrl of wpProxies) {
+      try {
+        const res = await fetch(pUrl);
+        if (res.ok) {
+          const mediaItems = await res.json();
+          if (Array.isArray(mediaItems) && mediaItems.length > 0) {
+            let wpImages: RefImage[] = [];
+            for (const item of mediaItems) {
+              const srcUrl =
+                item?.media_details?.sizes?.full?.source_url ||
+                item?.source_url ||
+                item?.guid?.rendered;
+              if (!srcUrl || !/\.(jpg|jpeg|png|webp)/i.test(srcUrl)) continue;
+              const thumbUrl =
+                item?.media_details?.sizes?.medium_large?.source_url ||
+                item?.media_details?.sizes?.medium?.source_url ||
+                srcUrl;
+              wpImages.push({
+                id: `wp-${Date.now()}-${wpImages.length}-${Math.random().toString(36).slice(2, 6)}`,
+                url: srcUrl,
+                pageUrl: item?.link || trimmed,
+                thumbnail: thumbUrl,
+                title: (item?.title?.rendered || 'Film Still').replace(/&#8211;|&#8212;/g, '—'),
+                width: item?.media_details?.width || 1280,
+                height: item?.media_details?.height || 720,
+                source: 'film-grab.com',
+                addedAt: Date.now(),
+              });
+            }
+            if (wpImages.length > 0) {
+              if (random) wpImages = shuffleArray(wpImages);
+              return wpImages.slice(0, count);
+            }
+          }
+        }
+      } catch {
+        // try next proxy
+      }
+    }
+  }
+
+  // 3. Generic webpage HTML extraction
   const proxies = [
     `https://api.allorigins.win/raw?url=${encodeURIComponent(trimmed)}`,
     `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(trimmed)}`,
@@ -357,10 +522,10 @@ export async function clientExtractUrlImages(targetUrl: string, count = 40): Pro
   }
 
   const seen = new Set<string>();
-  const images: RefImage[] = [];
+  let images: RefImage[] = [];
 
   const addImage = (rawSrc: string, label = '') => {
-    if (!rawSrc || images.length >= count) return;
+    if (!rawSrc || images.length >= count * 2) return;
     const cleaned = rawSrc.replace(/&amp;/g, '&').trim();
     if (cleaned.startsWith('data:') || cleaned.endsWith('.svg')) return;
     try {
@@ -378,7 +543,7 @@ export async function clientExtractUrlImages(targetUrl: string, count = 40): Pro
         title: label || `Reference ${images.length + 1}`,
         width: 900,
         height: 900,
-        source: 'web-link',
+        source: parsedTarget.hostname.replace(/^www\./, ''),
         addedAt: Date.now(),
       });
     } catch {
@@ -394,14 +559,15 @@ export async function clientExtractUrlImages(targetUrl: string, count = 40): Pro
   }
 
   const imgTagRegex = /<img[^>]+(?:data-src|data-lazy-src|data-original|src)=["']([^"']+)["'][^>]*>/gi;
-  while ((m = imgTagRegex.exec(html)) !== null && images.length < count) {
+  while ((m = imgTagRegex.exec(html)) !== null) {
     addImage(m[1]);
   }
 
   const rawImgRegex = /https?:\/\/[^"'\s<>\\]+\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"'\s<>\\]*)?/gi;
-  while ((m = rawImgRegex.exec(html)) !== null && images.length < count) {
+  while ((m = rawImgRegex.exec(html)) !== null) {
     addImage(m[0]);
   }
 
-  return images;
+  if (random) images = shuffleArray(images);
+  return images.slice(0, count);
 }
