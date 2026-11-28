@@ -169,7 +169,76 @@ export async function clientSearchImages(options: {
   const combined: RefImage[] = [];
   const seen = new Set<string>();
 
-  // 2. Bing Images async via CORS proxy (supports SafeSearch OFF via adlt=off and animated GIFs via photo-animatedgif)
+  // 2a. When NSFW mode is ON (!safeSearch), query PullPush Reddit over_18=true API (native CORS!)
+  if (!safeSearch) {
+    try {
+      const q = gifMode === 'only' ? `${query} gif` : query;
+      const ppUrl = `https://api.pullpush.io/reddit/search/submission/?q=${encodeURIComponent(
+        q
+      )}&over_18=true&size=80&sort=score&sort_type=desc`;
+      const ppRes = await fetch(ppUrl);
+      if (ppRes.ok) {
+        const ppData = await ppRes.json();
+        const posts = ppData?.data || [];
+
+        const addRedditCandidate = (imgUrl: string, thumbUrl: string, post: any) => {
+          if (!imgUrl || combined.length >= count) return;
+          const cleanImg = imgUrl.replace(/&amp;/g, '&');
+          const cleanThumb = (thumbUrl || cleanImg).replace(/&amp;/g, '&');
+          if (!/^https?:\/\//i.test(cleanImg) || seen.has(cleanImg)) return;
+          if (VIDEO_URL_RE.test(cleanImg)) return;
+          const isGif = GIF_URL_RE.test(cleanImg) || cleanImg.includes('format=gif');
+          if (gifMode === 'exclude' && isGif) return;
+          if (gifMode === 'only' && !isGif) return;
+
+          seen.add(cleanImg);
+          combined.push({
+            id: `red-${Date.now()}-${combined.length}-${Math.random().toString(36).slice(2, 6)}`,
+            url: cleanImg,
+            pageUrl: post.permalink ? `https://www.reddit.com${post.permalink}` : cleanImg,
+            thumbnail: cleanThumb,
+            title: post.title || query,
+            width: 900,
+            height: 900,
+            source: isGif ? 'bing-gif' : 'reddit-nsfw',
+            addedAt: Date.now(),
+          });
+        };
+
+        for (const post of posts) {
+          if (combined.length >= count) break;
+          const directUrl = String(post.url || '');
+          if (/\.(jpg|jpeg|png|webp|gif)(\?|#|$)/i.test(directUrl)) {
+            const thumb =
+              post.preview?.images?.[0]?.resolutions?.slice(-1)?.[0]?.url ||
+              (post.thumbnail && /^https?:\/\//i.test(post.thumbnail) ? post.thumbnail : directUrl);
+            addRedditCandidate(directUrl, thumb, post);
+            continue;
+          }
+          if (post.media_metadata && typeof post.media_metadata === 'object') {
+            for (const item of Object.values(post.media_metadata) as any[]) {
+              if (!item || item.status !== 'valid') continue;
+              const best = item.s?.gif || item.s?.u;
+              const thumb = item.p?.slice(-1)?.[0]?.u || best;
+              if (best) addRedditCandidate(best, thumb, post);
+            }
+            continue;
+          }
+          const prevImg = post.preview?.images?.[0];
+          if (prevImg) {
+            const gifVariant = prevImg.variants?.gif?.source?.url;
+            const srcUrl = gifVariant || prevImg.source?.url;
+            const thumb = prevImg.resolutions?.slice(-1)?.[0]?.url || srcUrl;
+            if (srcUrl) addRedditCandidate(srcUrl, thumb, post);
+          }
+        }
+      }
+    } catch {
+      // Fall through to Bing
+    }
+  }
+
+  // 2b. Bing Images async via CORS proxy (supports SafeSearch OFF via adlt=off and animated GIFs via photo-animatedgif)
   try {
     const adlt = safeSearch ? 'strict' : 'off';
     const qft = gifMode === 'only' ? '&qft=+filterui:photo-animatedgif' : '';

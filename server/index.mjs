@@ -162,7 +162,83 @@ async function searchGoogleImagesHTML(query, count = 45, safeSearch = true) {
 }
 
 /**
- * Bing Images async search (supports SafeSearch off via adlt=off and animated GIF filter via qft=+filterui:photo-animatedgif).
+ * Uncensored Reddit over_18 image & GIF search via PullPush API (for NSFW mode).
+ */
+async function searchRedditNsfwImages(query, count = 45, gifMode = 'exclude') {
+  const q = gifMode === 'only' ? `${query} gif` : query;
+  const url = `https://api.pullpush.io/reddit/search/submission/?q=${encodeURIComponent(
+    q
+  )}&over_18=true&size=80&sort=score&sort_type=desc`;
+
+  const res = await fetch(url, { headers: { 'User-Agent': BROWSER_UA } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  const posts = data?.data || [];
+  const results = [];
+  const seen = new Set();
+
+  const addCandidate = (imgUrl, thumbUrl, post) => {
+    if (!imgUrl || results.length >= count) return;
+    const cleanImg = imgUrl.replace(/&amp;/g, '&');
+    const cleanThumb = (thumbUrl || cleanImg).replace(/&amp;/g, '&');
+    if (!/^https?:\/\//i.test(cleanImg) || seen.has(cleanImg)) return;
+    if (VIDEO_URL_RE.test(cleanImg)) return;
+
+    const isGif = GIF_URL_RE.test(cleanImg) || cleanImg.includes('format=gif');
+    if (gifMode === 'exclude' && isGif) return;
+    if (gifMode === 'only' && !isGif) return;
+
+    seen.add(cleanImg);
+    results.push({
+      id: `red-${Date.now()}-${results.length}-${Math.random().toString(36).slice(2, 7)}`,
+      url: cleanImg,
+      pageUrl: post.permalink ? `https://www.reddit.com${post.permalink}` : cleanImg,
+      thumbnail: cleanThumb,
+      title: post.title || query,
+      width: 900,
+      height: 900,
+      isGif,
+      source: isGif ? 'bing-gif' : 'reddit-nsfw',
+    });
+  };
+
+  for (const post of posts) {
+    if (results.length >= count) break;
+    const directUrl = String(post.url || '');
+    if (/\.(jpg|jpeg|png|webp|gif)(\?|#|$)/i.test(directUrl)) {
+      const thumb =
+        post.preview?.images?.[0]?.resolutions?.slice(-1)?.[0]?.url ||
+        (post.thumbnail && /^https?:\/\//i.test(post.thumbnail) ? post.thumbnail : directUrl);
+      addCandidate(directUrl, thumb, post);
+      continue;
+    }
+
+    // Reddit gallery posts (media_metadata)
+    if (post.media_metadata && typeof post.media_metadata === 'object') {
+      for (const item of Object.values(post.media_metadata)) {
+        if (!item || item.status !== 'valid') continue;
+        const best = item.s?.gif || item.s?.u;
+        const thumb = item.p?.slice(-1)?.[0]?.u || best;
+        if (best) addCandidate(best, thumb, post);
+      }
+      continue;
+    }
+
+    // Preview images / GIF variants
+    const prevImg = post.preview?.images?.[0];
+    if (prevImg) {
+      const gifVariant = prevImg.variants?.gif?.source?.url;
+      const srcUrl = gifVariant || prevImg.source?.url;
+      const thumb = prevImg.resolutions?.slice(-1)?.[0]?.url || srcUrl;
+      if (srcUrl) addCandidate(srcUrl, thumb, post);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Bing Images async search (supports SafeSearch off via adlt=off + SRCHHPGUSR=ADLT=OFF cookie, and animated GIF filter).
  */
 async function searchBingImages(query, count = 45, safeSearch = true, gifMode = 'exclude') {
   const adlt = safeSearch ? 'strict' : 'off';
@@ -174,6 +250,7 @@ async function searchBingImages(query, count = 45, safeSearch = true, gifMode = 
       'User-Agent': BROWSER_UA,
       Accept: 'text/html,application/xhtml+xml,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
+      ...(!safeSearch ? { Cookie: 'SRCHHPGUSR=ADLT=OFF' } : {}),
     },
   });
   if (!res.ok) return [];
@@ -329,13 +406,22 @@ app.get('/api/search', async (req, res) => {
       rawImages = await searchGoogleCSE(effectiveQuery, googleApiKey, googleCx, fetchLimit, safeSearch);
       provider = 'google-cse';
     } else {
-      // For GIF-only or NSFW searches, Bing async supports native adlt=off and photo-animatedgif filters reliably
-      if (gifMode === 'only' || !safeSearch) {
+      // For NSFW searches, combine uncensored Reddit over_18 results + Bing ADLT=OFF results
+      if (!safeSearch) {
+        const [redditRes, bingRes] = await Promise.allSettled([
+          searchRedditNsfwImages(rawQuery, fetchLimit, gifMode),
+          searchBingImages(effectiveQuery, fetchLimit, false, gifMode),
+        ]);
+        const rImgs = redditRes.status === 'fulfilled' ? redditRes.value : [];
+        const bImgs = bingRes.status === 'fulfilled' ? bingRes.value : [];
+        rawImages = [...rImgs, ...bImgs];
+        provider = rImgs.length > 0 ? 'nsfw-uncensored' : 'bing';
+      } else if (gifMode === 'only') {
         try {
           rawImages = await searchBingImages(effectiveQuery, fetchLimit, safeSearch, gifMode);
           provider = 'bing';
         } catch (err) {
-          console.warn('Bing search failed:', err.message);
+          console.warn('Bing GIF search failed:', err.message);
         }
       }
 
